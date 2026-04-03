@@ -1,0 +1,7 @@
+--- a/grub.patches.orig
++++ b/grub.patches
+@@ -297,6 +297,7 @@
+ # TLCP trusted boot support
+ Patch2001: 0001-add-tlcp-trusted-boot-support.patch
+ Patch2002: 0002-fix-tlcp-api-compat-grub2-2.12.patch
++Patch2003: 0003-tlcp-rewrite-grub2-2.12-arch.patch

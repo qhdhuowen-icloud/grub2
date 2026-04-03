@@ -1,0 +1,47 @@
+From d207521fbb145715fb87f003f1beabc69844ff8b Mon Sep 17 00:00:00 2001
+From: Fedora Ninjas <grub2-owner@fedoraproject.org>
+Date: Fri, 3 Apr 2026 11:06:35 +0800
+Subject: [PATCH] tlcp: guard grub_tpm_present() call with EFI/IEEE1275
+ platform check
+
+grub_tpm_present() is only defined when the 'tpm' module is compiled,
+which only happens for GRUB_MACHINE_EFI and GRUB_MACHINE_IEEE1275.
+On i386-pc and other bare-metal platforms it is undefined, causing
+moddep to fail:
+
+  grub_tpm_present in boot is not defined
+
+Wrap the grub_tpm_present() call in boot.c with the appropriate
+platform guard so non-EFI builds fall through directly to file-based
+policy validation.
+---
+ grub-core/commands/boot.c | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/grub-core/commands/boot.c b/grub-core/commands/boot.c
+index a9afae1..2cec486 100644
+--- a/grub-core/commands/boot.c
++++ b/grub-core/commands/boot.c
+@@ -233,6 +233,11 @@ grub_cmd_boot (struct grub_command *cmd __attribute__ ((unused)),
+   (void)key;
+   grub_measure_configured_files();
+ 
++  /*
++   * grub_tpm_present() is only available on EFI and powerpc_ieee1275.
++   * On other platforms (e.g. i386-pc) skip straight to file-based policy.
++   */
++#if defined(GRUB_MACHINE_EFI) || defined(GRUB_MACHINE_IEEE1275)
+   if(grub_tpm_present())
+     {
+       policy_state = grub_tpm_policy_state();
+@@ -260,6 +265,7 @@ grub_cmd_boot (struct grub_command *cmd __attribute__ ((unused)),
+       }
+     }
+     else
++#endif /* GRUB_MACHINE_EFI || GRUB_MACHINE_IEEE1275 */
+     {
+       policy_state = grub_file_policy_state();
+       if(((policy_state & POLICY_STATE_CHEKC_MASK) == POLICY_STATE_AUDIT) || ((policy_state & POLICY_STATE_CHEKC_MASK) == POLICY_STATE_SUPERVISORY))
+-- 
+2.47.3
+

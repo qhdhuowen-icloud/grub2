@@ -1,0 +1,150 @@
+From 96d563f346c5f7f3eb29449b8e36a49cafb8f367 Mon Sep 17 00:00:00 2001
+From: Fedora Ninjas <grub2-owner@fedoraproject.org>
+Date: Fri, 3 Apr 2026 12:19:49 +0800
+Subject: [PATCH] tlcp: fix 6 code review issues
+
+1. unmarshal_uint32: use grub_get_unaligned32() instead of direct pointer
+   cast to avoid undefined behavior on strict-alignment architectures (ARM).
+
+2. check_file_policy_state: clear grub_errno when policy file is absent so
+   the GRUB error state is not left dirty for subsequent operations.
+
+3. get_hardware_dec_key / get_software_dec_key: always flush the TPM policy
+   session (limited resource) on both success and failure paths; previously
+   the successful Unseal path leaked the session handle.
+
+4. get_hardware_dec_key / get_software_dec_key: zero out_data (stack variable
+   holding the unsealed key material) before returning to avoid leaving
+   sensitive key bytes in stack memory.
+
+5. grub_tpm_integrity_validation: remove the per-check calls to
+   grub_file_integrity_validation() inside the hardware and software check
+   blocks.  When both checks fail with halt=1, the old code prompted the user
+   for passphrases twice (once per failed check).  Consolidate into a single
+   call after both checks complete.
+
+6. grub_measure_configured_files: change 'int len' to 'grub_size_t len' and
+   cast file->size (grub_off_t) explicitly to avoid silent truncation of
+   large-file sizes; match the grub_file_read return-value comparison type.
+---
+ grub-core/kern/efi/tlcp.c | 12 +++++++++---
+ grub-core/kern/tlcp.c     | 18 +++++++++++-------
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+diff --git a/grub-core/kern/efi/tlcp.c b/grub-core/kern/efi/tlcp.c
+index d021350..63337cd 100644
+--- a/grub-core/kern/efi/tlcp.c
++++ b/grub-core/kern/efi/tlcp.c
+@@ -64,7 +64,7 @@ change_endian_dword (unsigned int p)
+ static void
+ unmarshal_uint32 (unsigned char *buffer, unsigned int *value)
+ {
+-    *value = change_endian_dword (*(unsigned int *)buffer);
++    *value = change_endian_dword (grub_get_unaligned32 (buffer));
+ }
+ 
+ /* -------------------------------------------------------------------------
+@@ -228,6 +228,8 @@ check_file_policy_state (void)
+     file = grub_file_open (POLICYFILE, GRUB_FILE_TYPE_CAT);
+     if (!file || !file->size)
+     {
++        if (grub_errno != GRUB_ERR_NONE)
++            grub_errno = GRUB_ERR_NONE;
+         result = TSS2_APP_RC_POLICY_NOT_EXIST;
+         goto end;
+     }
+@@ -571,10 +573,12 @@ get_hardware_dec_key (unsigned char **out, int *out_len)
+         goto flush;
+     }
+     grub_memcpy (*out, out_data.buffer, out_data.size);
+-    goto end;
+ 
+ flush:
++    /* Always flush the policy session — limited TPM resource */
+     grub_tpm2_flush_context (session_handle);
++    /* Zero sensitive key material from the stack */
++    grub_memset (&out_data, 0, sizeof (out_data));
+ end:
+     return result;
+ }
+@@ -673,10 +677,12 @@ get_software_dec_key (unsigned char **out, int *out_len)
+         goto flush;
+     }
+     grub_memcpy (*out, out_data.buffer, out_data.size);
+-    goto end;
+ 
+ flush:
++    /* Always flush the policy session — limited TPM resource */
+     grub_tpm2_flush_context (session_handle);
++    /* Zero sensitive key material from the stack */
++    grub_memset (&out_data, 0, sizeof (out_data));
+ end:
+     return result;
+ }
+diff --git a/grub-core/kern/tlcp.c b/grub-core/kern/tlcp.c
+index 3898e6e..cacfac2 100644
+--- a/grub-core/kern/tlcp.c
++++ b/grub-core/kern/tlcp.c
+@@ -404,8 +404,6 @@ grub_tpm_integrity_validation (int halt)
+         grub_printf (N_("*********************************************\n"));
+         grub_printf (N_("*    Platform Integrity Has been Broken!    *\n"));
+         grub_printf (N_("*********************************************\n"));
+-        if (halt)
+-            grub_file_integrity_validation (1);
+     }
+     else
+     {
+@@ -424,8 +422,6 @@ grub_tpm_integrity_validation (int halt)
+         grub_printf (N_("*********************************************\n"));
+         grub_printf (N_("*  Host OS Kernel&Initrd Has been Broken!   *\n"));
+         grub_printf (N_("*********************************************\n"));
+-        if (halt)
+-            grub_file_integrity_validation (1);
+     }
+     else
+     {
+@@ -437,6 +433,14 @@ grub_tpm_integrity_validation (int halt)
+     endtime = grub_get_time_ms () + 500;
+     while (grub_get_time_ms () < endtime);
+ 
++    /*
++     * If any integrity check failed and halt is requested, invoke the
++     * passphrase fallback exactly once.  Calling it separately inside each
++     * check would prompt the user twice when both hardware and software fail.
++     */
++    if ((hard_integrity || soft_integrity) && halt)
++        grub_file_integrity_validation (1);
++
+ end:
+     if (hard_buf) grub_free (hard_buf);
+     if (soft_buf) grub_free (soft_buf);
+@@ -610,7 +614,7 @@ grub_measure_configured_files (void)
+     grub_err_t  result = GRUB_ERR_NONE;
+     grub_file_t file   = 0;
+     char       *buf    = 0;
+-    int         len    = 0;
++    grub_size_t len    = 0;
+ 
+     file = grub_file_open (MEASUREMENT_CONFIG_FILE, GRUB_FILE_TYPE_CAT);
+     if (!file || !file->size)
+@@ -621,7 +625,7 @@ grub_measure_configured_files (void)
+         goto end;
+     }
+ 
+-    len = file->size;
++    len = (grub_size_t)file->size;
+     buf = grub_malloc (len + 1);
+     if (!buf)
+     {
+@@ -629,7 +633,7 @@ grub_measure_configured_files (void)
+         goto end;
+     }
+ 
+-    if (grub_file_read (file, buf, len) != len)
++    if ((grub_size_t)grub_file_read (file, buf, len) != len)
+         goto end;
+ 
+     /*
+-- 
+2.47.3
+
